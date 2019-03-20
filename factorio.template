@@ -1,0 +1,140 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  InstanceTypeParameter:
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.small
+      - m5.large
+    Description: Enter t3.small or m5.large. Default is t3.small.
+  SSHKeyName:
+    Type: String
+    Description: Enter the name of your ssh key. Required.
+  SaveGameBucketName:
+    Type: String
+    Description: Enter the name of s3 bucket for saves. Required.
+  VPCCidrBlock:
+    Type: String
+    AllowedPattern: ^([0-9]{1,3}\.){3}[0-9]{1,3}(\/([0-9]|[1-2][0-9]|3[0-2]))?$
+    Description: Enter desired CIDR block for your VPC. Required.
+  SSHCidrBlock:
+    Type: String
+    AllowedPattern: ^([0-9]{1,3}\.){3}[0-9]{1,3}(\/([0-9]|[1-2][0-9]|3[0-2]))?$
+    Description: Enter desired CIDR block for SSH Access. Required.
+Resources:
+  FactorioVPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+        CidrBlock:
+          Ref: VPCCidrBlock
+        EnableDnsSupport: True
+        EnableDnsHostnames: True
+        InstanceTenancy: "default"
+        Tags:
+          - Key: Name
+            Value: Factorio
+  FactorioPublicSubnet:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref FactorioVPC
+      CidrBlock: !GetAtt FactorioVPC.CidrBlock
+      MapPublicIpOnLaunch: True
+  FactorioRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref FactorioVPC
+      Tags:
+        - Key: Name
+          Value: Public
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref FactorioPublicSubnet
+      RouteTableId: !Ref FactorioRouteTable
+  InternetGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: FactorioIGW
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref FactorioVPC
+      InternetGatewayId: !Ref InternetGW
+  RouteToIGW:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref FactorioRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGW
+  FactorioServerIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+    DependsOn: FactorioVPC
+  FactorioSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: Factorio
+      GroupDescription: Factorio Server
+      VpcId: !Ref FactorioVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp:
+            Ref: SSHCidrBlock
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Factorio
+  FactorioLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      AssociatePublicIpAddress: true
+      # IamInstanceProfile:
+      ImageId: ami-0565af6e282977273 # Ubuntu 16.04
+      EbsOptimized: true
+      InstanceMonitoring: false
+      InstanceType:
+        Ref: InstanceTypeParameter
+      KeyName:
+        Ref: SSHKeyName
+      SecurityGroups:
+        - !Ref FactorioSG
+      SpotPrice: "0.01"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -ex
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+          sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+          sudo apt-get update
+          sudo apt-get install -y docker-ce
+          sudo usermod -aG docker ubuntu
+          sudo mkdir -p /opt/factorio
+          sudo docker run -d -p 34197:34197/udp -p 27015:27015/tcp -v /opt/factorio:/factorio --name factorio --restart=always dtandersen/factorio:0.17
+  FactorioASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: Factorio
+      AvailabilityZones:
+        - !GetAtt FactorioPublicSubnet.AvailabilityZone
+      LaunchConfigurationName: !Ref FactorioLaunchConfig
+      DesiredCapacity: 1
+      MinSize: 0
+      MaxSize: 1
+      VPCZoneIdentifier:
+        - !Ref FactorioPublicSubnet
+      Tags:
+        - Key: Name
+          Value: FactorioServer
+          PropagateAtLaunch: 'true'
+  SaveGameBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: Private
+      BucketName:
+        Ref: SaveGameBucketName
