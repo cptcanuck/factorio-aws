@@ -1,0 +1,156 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  NetworkStackName:
+    Description: Name of an active CloudFormation stack that contains the networking
+      resources, such as the subnet and security group, that will be used in this
+      stack.
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+    Default: vpc-deploy
+  InstanceTypeParameter:
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.small
+      - m5.large
+    Description: Enter t3.small or m5.large. Default is t3.small.
+  SSHKeyName:
+    Type: String
+    Description: Enter the name of your ssh key. Required.
+    Default: default
+  SaveGameBucketName:
+    Type: String
+    Description: Enter the name of s3 bucket for saves. Required.
+  SSHCidrBlock:
+    Type: String
+    AllowedPattern: ^([0-9]{1,3}\.){3}[0-9]{1,3}(\/([0-9]|[1-2][0-9]|3[0-2]))?$
+    Description: Enter desired CIDR block for SSH Access. Required.
+Resources:
+  SpotFleetRole: 
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Sid: ""
+            Effect: Allow
+            Principal: 
+              Service: "spotfleet.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Path: "/factorio/"
+      RoleName: SpotFleetRole
+      ManagedPolicyArns: 
+        - 
+          "arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetRole"
+  FactorioInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/factorio/"
+      InstanceProfileName: InstanceProfile
+      Roles:
+        - 
+          Ref: FactorioRole
+  FactorioRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/factorio/"
+      RoleName: InstanceRole
+      ManagedPolicyArns: []
+      Policies:
+        - PolicyName: FactorioPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                  - s3:List*
+                  - s3:Put*
+                Resource:
+                  - 'arn:aws:s3:::SaveGameBucketName/'
+                  - 'arn:aws:s3:::SaveGameBucketName/*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  - arn:aws:logs:*:*:*
+  FactorioSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: Factorio
+      GroupDescription: Factorio Server
+      VpcId: 
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-VPCID"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp:
+            Ref: SSHCidrBlock
+        - IpProtocol: udp
+          FromPort: 34197
+          ToPort: 34197
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Factorio
+  FactorioLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      AssociatePublicIpAddress: true
+      ImageId: ami-0565af6e282977273
+      EbsOptimized: true
+      InstanceMonitoring: false
+      InstanceType:
+        Ref: InstanceTypeParameter
+      KeyName:
+        Ref: SSHKeyName
+      SecurityGroups:
+        - !Ref FactorioSG
+      SpotPrice: "0.01"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -ex
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+          sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+          sudo apt-get update
+          sudo apt-get install -y docker-ce
+          sudo apt-get -y install awscli
+          sudo usermod -aG docker ubuntu
+          sudo mkdir -p /opt/factorio
+          sudo docker run -d -p 34197:34197/udp -p 27015:27015/tcp -v /opt/factorio:/factorio --name factorio --restart=always dtandersen/factorio:0.17
+  FactorioASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: Factorio
+      AvailabilityZones:
+        - us-east-1b
+      LaunchConfigurationName: !Ref FactorioLaunchConfig
+      DesiredCapacity: 1
+      MinSize: 0
+      MaxSize: 1
+      VPCZoneIdentifier:
+        - subnet-039c6bcb573d86ca3
+      Tags:
+        - Key: Name
+          Value: FactorioServer
+          PropagateAtLaunch: 'true'

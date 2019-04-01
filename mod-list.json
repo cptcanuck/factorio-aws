@@ -1,0 +1,37 @@
+
+{
+  "mods": 
+  [
+    
+    {
+      "name": "base",
+      "enabled": true
+    },
+    
+    {
+      "name": "ClosestFirst",
+      "enabled": false
+    },
+    
+    {
+      "name": "factorio-reach",
+      "enabled": false
+    },
+    
+    {
+      "name": "FARL",
+      "enabled": false
+    },
+    
+    {
+      "name": "Squeak Through",
+      "enabled": false
+    },
+    
+    {
+      "name": "YARM",
+      "enabled": false
+    }
+  ]
+}
+
