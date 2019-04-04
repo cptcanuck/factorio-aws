@@ -24,10 +24,18 @@ Parameters:
   SaveGameBucketName:
     Type: String
     Description: Enter the name of s3 bucket for saves. Required.
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+    Default: toddfactorio
   SSHCidrBlock:
     Type: String
     AllowedPattern: ^([0-9]{1,3}\.){3}[0-9]{1,3}(\/([0-9]|[1-2][0-9]|3[0-2]))?$
     Description: Enter desired CIDR block for SSH Access. Required.
+  SaveGameName:
+    Description: Save game name, will persist even if this stack is deleted. Stored
+      in FactorioBucket.
+    Type: String
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+    Default: 'funtime'
 Resources:
   SpotFleetRole: 
     Type: "AWS::IAM::Role"
@@ -50,7 +58,7 @@ Resources:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Path: "/factorio/"
-      InstanceProfileName: InstanceProfile
+      InstanceProfileName: FactorioInstanceProfile
       Roles:
         - 
           Ref: FactorioRole
@@ -66,7 +74,7 @@ Resources:
               Service: ec2.amazonaws.com
             Action: sts:AssumeRole
       Path: "/factorio/"
-      RoleName: InstanceRole
+      RoleName: FactorioInstanceRole
       ManagedPolicyArns: []
       Policies:
         - PolicyName: FactorioPolicy
@@ -79,8 +87,9 @@ Resources:
                   - s3:List*
                   - s3:Put*
                 Resource:
-                  - 'arn:aws:s3:::SaveGameBucketName/'
-                  - 'arn:aws:s3:::SaveGameBucketName/*'
+                  - 'arn:aws:s3:::toddfactorio'
+                  - 'arn:aws:s3:::toddfactorio/'
+                  - 'arn:aws:s3:::toddfactorio/*'
               - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
@@ -119,25 +128,45 @@ Resources:
       AssociatePublicIpAddress: true
       ImageId: ami-0565af6e282977273
       EbsOptimized: true
+      IamInstanceProfile: FactorioInstanceProfile
       InstanceMonitoring: false
-      InstanceType:
-        Ref: InstanceTypeParameter
-      KeyName:
-        Ref: SSHKeyName
+      InstanceType: !Ref InstanceTypeParameter
+      KeyName: !Ref SSHKeyName
       SecurityGroups:
         - !Ref FactorioSG
-      SpotPrice: "0.01"
+      SpotPrice: "0.05"
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash -ex
           curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
           sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
           sudo apt-get update
+          sudo apt-get install -y curl
           sudo apt-get install -y docker-ce
           sudo apt-get -y install awscli
+          #curl https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/awslogs-agent-setup.py -O
+          #sudo python3 ./awslogs-agent-setup.py --region us-east-1
           sudo usermod -aG docker ubuntu
-          sudo mkdir -p /opt/factorio
-          sudo docker run -d -p 34197:34197/udp -p 27015:27015/tcp -v /opt/factorio:/factorio --name factorio --restart=always dtandersen/factorio:0.17
+          useradd factorio
+          sudo mkdir -p /opt/factorio/{mods,config,data}
+          sudo aws s3 cp s3://toddfactorio/server-settings.json /opt/factorio/config/server-settings.json
+          sudo aws s3 cp s3://toddfactorio/map-settings.json /opt/factorio/config/map-settings.json
+          sudo aws s3 cp s3://toddfactorio/map-gen-settings.json /opt/factorio/config/map-gen-settings.json
+          sudo aws s3 cp s3://toddfactorio/mods/* /opt/factorio/mods --recursive
+          exists=$(aws s3 ls s3://toddfactorio/saves/textnowmp/funtime.zip)
+          if [ -z "$exists" ]; then
+            echo "Save game not found... will use auto generated world"
+          else
+            echo "Save game found in S3 - using that"
+            aws s3 cp s3://toddfactorio/saves/textnowmp/funtime.zip /opt/factorio/saves/funtime.zip
+            #chown -R factorio:factorio /opt/factorio/saves"
+          fi
+          chown -R factorio.factorio /opt/factorio
+          sudo docker run -d -e MODS=/opt/factorio/mods -p 34197:34197/udp -p 27015:27015/tcp -v /opt/factorio:/factorio --name factorio --restart=always dtandersen/factorio:0.17
+          #sudo docker run -d -p 34197:34197/udp -p 27015:27015/tcp -v /opt/factorio:/factorio --name factorio --restart=always dtandersen/factorio:0.17
+          echo "find /opt/factorio/saves -mmin -1 -type f -exec /usr/bin/aws s3 cp {} s3://toddfactorio/saves/textnowmp/ \;" >> /opt/factorio/backup-saves.sh
+          chmod +x /opt/factorio/backup-saves.sh
+          echo "* * * * * /opt/factorio/backup-saves.sh" | crontab -
   FactorioASG:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
@@ -154,3 +183,64 @@ Resources:
         - Key: Name
           Value: FactorioServer
           PropagateAtLaunch: 'true'
+  #SaveGameBucket:
+  #  Type: AWS::S3::Bucket
+  #  Properties:
+  #    AccessControl: Private
+  #    BucketName: toddfactorio
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - 
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/factorio/"
+      Policies:
+        -
+          PolicyName: "useFactorioASG"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: [ 
+                  "autoscaling:SetDesiredCapacity",
+                  "autoscaling:DescribeAutoScalingGroups"
+                ]
+                Resource: "*"
+        - 
+          PolicyName: "writeLambdaCWLogs"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: [
+                  "logs:CreateLogGroup",
+                  "logs:CreateLogStream",
+                  "logs:PutLogEvents",
+                  "logs:GetLogEvents",
+                  "logs:DescribeLogStreams",
+                  "logs:DescribeLogGroups",
+                  "logs:FilterLogEvents"
+                ]
+                Resource: "arn:aws:logs:*:*:*"
+        -
+          PolicyName: "describeEC2instances"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: [ 
+                  "ec2:DescribeInstances"
+                ]
+                Resource: "*"
+
